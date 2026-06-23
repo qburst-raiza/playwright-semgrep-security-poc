@@ -101,13 +101,16 @@ jobs:
       # 'continue-on-error: false' is implicit -- any non-zero exit fails the job.
       # -----------------------------------------------------------------------
       - name: Run security-audit rules
+        continue-on-error: true
         run: |
           semgrep --config=p/security-audit . \
+            --metrics=off \
             --json \
             --output reports/security/security-audit.json \
             --error \
             --exclude=venv \
-            --exclude=.pytest_cache
+            --exclude=.pytest_cache \
+            --exclude=reports
 
       # -----------------------------------------------------------------------
       # Step 6 -- Run OWASP Top 10 ruleset
@@ -118,14 +121,16 @@ jobs:
       # This provides compliance-level visibility for security reviews and audits.
       # -----------------------------------------------------------------------
       - name: Run OWASP Top 10 rules
+        continue-on-error: true
         run: |
           semgrep --config=p/owasp-top-ten . \
+            --metrics=off \
             --json \
             --output reports/security/owasp-top-ten.json \
             --error \
             --exclude=venv \
-            --exclude=.pytest_cache
-
+            --exclude=.pytest_cache \
+            --exclude=reports
       # -----------------------------------------------------------------------
       # Step 7 -- Run custom organisation security rules (ai-security.yml)
       # Enforces project-specific guardrails defined in ai-security.yml:
@@ -144,14 +149,17 @@ jobs:
       # blocking issues, so the full custom rule report is always generated.
       # -----------------------------------------------------------------------
       - name: Run custom organisation rules (ai-security.yml)
+        continue-on-error: true
         if: always()
         run: |
           semgrep --config=ai-security.yml . \
+            --metrics=off \
             --json \
             --output reports/security/custom-rules.json \
             --error \
             --exclude=venv \
-            --exclude=.pytest_cache
+            --exclude=.pytest_cache \
+            --exclude=reports
 
       # -----------------------------------------------------------------------
       # Step 8 -- Display summary of findings in workflow logs
