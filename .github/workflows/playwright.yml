@@ -75,16 +75,15 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Run tests
         env:
-          # Security: secrets are stored in GitHub repository/org secret store
-          # and injected here at runtime -- never written to disk or logs.
           TEST_USERNAME: ${{ secrets.TEST_USERNAME }}
           TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
+          RECORD_VIDEO: ${{ secrets.RECORD_VIDEO }}
         run: |
           pytest tests/specs \
             --browser chromium \
             --html=reports/report.html \
-             --self-contained-html \
-             -v
+            --self-contained-html \
+            -v
 
       # -----------------------------------------------------------------------
       # Step 6 -- Upload HTML test report as workflow artifact
@@ -98,4 +97,11 @@ jobs:
         with:
           name: playwright-html-report
           path: reports/report.html
+          retention-days: 14
+      - name: Upload Playwright Videos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-videos
+          path: reports/videos/
           retention-days: 14
