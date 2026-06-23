@@ -138,3 +138,6 @@ def delete_user(user_id: str) -> None:
     # VULN: f-string interpolation in SQL — use parameterised queries.
     cursor.execute(f"DELETE FROM users WHERE id = {user_id}")  # noqa: S608
     conn.commit()
+    
+# Demo change
+# Trigger CI/CD pipeline

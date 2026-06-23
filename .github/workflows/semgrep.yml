@@ -1,0 +1,238 @@
+# =============================================================================
+# Semgrep Security Scanning -- CI/CD Pipeline
+# =============================================================================
+# Purpose  : Automatically run static application security testing (SAST) on
+#             every push and pull request to detect vulnerabilities before code
+#             reaches main and before functional tests run.
+#
+# Scan targets:
+#   1. p/security-audit   -- Semgrep's general security audit ruleset
+#   2. p/owasp-top-ten    -- OWASP Top 10 mapped rules
+#   3. ai-security.yml    -- Custom org rules (hardcoded secrets, weak crypto,
+#                            shell injection, pickle, SQL injection, Playwright
+#                            credential leaks, insecure HTTP, CI/CD secrets)
+#
+# Integration pattern:
+#   - Playwright workflow  --> functional validation (tests/specs/)
+#   - This workflow        --> security validation   (entire repository)
+#   Both run in parallel on every push and PR, providing continuous assurance.
+#
+# Pipeline behavior:
+#   - Blocking findings (ERROR severity) cause the workflow to exit non-zero,
+#     failing the job and blocking the PR merge.
+#   - Reports are uploaded as artifacts on every run (pass or fail) so that
+#     security findings can be reviewed without re-running the workflow.
+#
+# Security guardrail: No secrets are required by this workflow.
+#   Semgrep OSS rules run without authentication. The workflow intentionally
+#   does not reference any ${{ secrets.* }} values to minimise the attack
+#   surface of the CI/CD pipeline itself.
+# =============================================================================
+
+name: Semgrep Security Scan
+
+on:
+  # Scan every push so vulnerabilities are caught at the earliest possible point.
+  push:
+
+  # Scan every pull request so insecure code is blocked before merge review.
+  pull_request:
+
+jobs:
+  semgrep-scan:
+    name: Semgrep SAST Scan
+    runs-on: ubuntu-latest   # Use the latest Ubuntu LTS runner.
+    timeout-minutes: 20      # Hard cap -- Semgrep scans complete in < 5 min
+                             # for this repo; 20 min prevents runaway jobs.
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1 -- Checkout repository
+      # Full checkout is required so Semgrep can scan all Python source files,
+      # YAML workflow files, and the custom ai-security.yml ruleset located in
+      # the repository root.
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2 -- Set up Python 3.13
+      # Semgrep is distributed as a Python package. Python 3.13 is pinned to
+      # match the project's target runtime. No pip cache is used here because
+      # semgrep is a single pinned install and caching provides minimal benefit
+      # over the small install time.
+      # -----------------------------------------------------------------------
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # -----------------------------------------------------------------------
+      # Step 3 -- Install Semgrep
+      # Installs the latest stable Semgrep CLI from PyPI. Semgrep OSS is free
+      # and requires no login for the rulesets used in this workflow.
+      # -----------------------------------------------------------------------
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      # -----------------------------------------------------------------------
+      # Step 4 -- Create security report output directory
+      # Ensures the target directory exists before any scan step writes to it.
+      # All three scan steps write JSON reports into this directory so they
+      # can be uploaded together as a single artifact in Step 8.
+      # -----------------------------------------------------------------------
+      - name: Create security report directory
+        run: mkdir -p reports/security
+
+      # -----------------------------------------------------------------------
+      # Step 5 -- Run Semgrep security-audit ruleset
+      # Semgrep's p/security-audit ruleset covers a broad set of security
+      # anti-patterns across Python including:
+      #   - Hardcoded secrets and tokens
+      #   - Dangerous function calls (eval, exec, os.system)
+      #   - Insecure deserialization (pickle)
+      #   - Weak cryptography (MD5, SHA-1)
+      #   - Command injection patterns
+      #
+      # --json writes machine-readable output for artifact upload and downstream
+      # tooling (e.g. SIEM ingestion, dashboards).
+      # --error causes semgrep to exit with code 1 on any ERROR-severity finding,
+      # which fails this step and blocks the pipeline.
+      # 'continue-on-error: false' is implicit -- any non-zero exit fails the job.
+      # -----------------------------------------------------------------------
+      - name: Run security-audit rules
+        run: |
+          semgrep --config=p/security-audit . \
+            --json \
+            --output reports/security/security-audit.json \
+            --error \
+            --exclude=venv \
+            --exclude=.pytest_cache
+
+      # -----------------------------------------------------------------------
+      # Step 6 -- Run OWASP Top 10 ruleset
+      # Maps findings to OWASP Top 10 categories (2021 edition):
+      #   A01 Broken Access Control, A02 Cryptographic Failures,
+      #   A03 Injection, A05 Security Misconfiguration,
+      #   A08 Software and Data Integrity Failures, etc.
+      # This provides compliance-level visibility for security reviews and audits.
+      # -----------------------------------------------------------------------
+      - name: Run OWASP Top 10 rules
+        run: |
+          semgrep --config=p/owasp-top-ten . \
+            --json \
+            --output reports/security/owasp-top-ten.json \
+            --error \
+            --exclude=venv \
+            --exclude=.pytest_cache
+
+      # -----------------------------------------------------------------------
+      # Step 7 -- Run custom organisation security rules (ai-security.yml)
+      # Enforces project-specific guardrails defined in ai-security.yml:
+      #   - Hardcoded API keys, passwords, tokens, AWS credentials
+      #   - Weak crypto: MD5, SHA-1
+      #   - Dangerous command execution: subprocess shell=True, os.system()
+      #   - Unsafe serialization: pickle.dumps(), pickle.loads()
+      #   - SQL injection: string concat, f-string, % format, str.format()
+      #   - Playwright credential leaks: fill() with hardcoded values
+      #   - Environment variable enforcement
+      #   - Sensitive data in logs/print statements
+      #   - Insecure HTTP (cleartext transmission)
+      #   - GitHub Actions hardcoded secrets in workflow YAML
+      #
+      # 'if: always()' ensures this step runs even if Steps 5 or 6 found
+      # blocking issues, so the full custom rule report is always generated.
+      # -----------------------------------------------------------------------
+      - name: Run custom organisation rules (ai-security.yml)
+        if: always()
+        run: |
+          semgrep --config=ai-security.yml . \
+            --json \
+            --output reports/security/custom-rules.json \
+            --error \
+            --exclude=venv \
+            --exclude=.pytest_cache
+
+      # -----------------------------------------------------------------------
+      # Step 8 -- Display summary of findings in workflow logs
+      # Outputs a human-readable summary directly to the GitHub Actions log so
+      # engineers can see findings inline without downloading the artifact.
+      # 'if: always()' ensures this runs even when earlier steps failed, giving
+      # full visibility into what was detected.
+      # -----------------------------------------------------------------------
+      - name: Display security findings summary
+        if: always()
+        run: |
+          echo "============================================================"
+          echo "  SEMGREP SECURITY SCAN SUMMARY"
+          echo "============================================================"
+
+          echo ""
+          echo "-- security-audit findings --"
+          if [ -f reports/security/security-audit.json ]; then
+            python3 -c "
+          import json, sys
+          with open('reports/security/security-audit.json') as f:
+              data = json.load(f)
+          results = data.get('results', [])
+          print(f'Total findings: {len(results)}')
+          for r in results:
+              print(f\"  [{r['extra']['severity']}] {r['check_id']} -- {r['path']}:{r['start']['line']}\")
+          "
+          else
+            echo "  Report not generated."
+          fi
+
+          echo ""
+          echo "-- owasp-top-ten findings --"
+          if [ -f reports/security/owasp-top-ten.json ]; then
+            python3 -c "
+          import json
+          with open('reports/security/owasp-top-ten.json') as f:
+              data = json.load(f)
+          results = data.get('results', [])
+          print(f'Total findings: {len(results)}')
+          for r in results:
+              print(f\"  [{r['extra']['severity']}] {r['check_id']} -- {r['path']}:{r['start']['line']}\")
+          "
+          else
+            echo "  Report not generated."
+          fi
+
+          echo ""
+          echo "-- custom ai-security.yml findings --"
+          if [ -f reports/security/custom-rules.json ]; then
+            python3 -c "
+          import json
+          with open('reports/security/custom-rules.json') as f:
+              data = json.load(f)
+          results = data.get('results', [])
+          print(f'Total findings: {len(results)}')
+          for r in results:
+              print(f\"  [{r['extra']['severity']}] {r['check_id']} -- {r['path']}:{r['start']['line']}\")
+          "
+          else
+            echo "  Report not generated."
+          fi
+
+          echo ""
+          echo "============================================================"
+          echo "  Full reports available in the semgrep-security-reports artifact."
+          echo "============================================================"
+
+      # -----------------------------------------------------------------------
+      # Step 9 -- Upload security reports as workflow artifact
+      # All three JSON reports are uploaded together under one artifact name.
+      # 'if: always()' is critical here -- reports must be uploaded even when
+      # earlier scan steps detected blocking findings and exited non-zero.
+      # Without this, failed scans would produce no downloadable evidence.
+      # Reports are retained for 14 days and then automatically deleted by
+      # GitHub to manage storage costs.
+      # -----------------------------------------------------------------------
+      - name: Upload security reports
+        if: always()   # Always upload -- even when scans detect blocking findings.
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-security-reports
+          path: reports/security/
+          retention-days: 14
