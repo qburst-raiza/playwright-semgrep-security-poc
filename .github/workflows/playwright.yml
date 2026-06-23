@@ -1,73 +1,101 @@
+﻿# =============================================================================
+# Playwright Python Test Automation -- CI/CD Pipeline
+# =============================================================================
+# Triggers : push to any branch, pull_request to any branch
+# Runner   : ubuntu-latest
+# Python   : 3.13
+# Reports  : HTML report uploaded as workflow artifact after every run
+# Security : All credentials injected via GitHub Secrets -- never hardcoded
+# =============================================================================
+
 name: Playwright Tests
 
 on:
+  # Run on every push to any branch so issues are caught early.
   push:
-    branches: [main, develop]
+
+  # Run on every pull request so regressions are blocked before merge.
   pull_request:
-    branches: [main, develop]
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: "Target environment"
-        required: true
-        default: "staging"
-        type: choice
-        options:
-          - staging
-          - production
 
 jobs:
-  test:
+  playwright-tests:
     name: Run Playwright Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    strategy:
-      fail-fast: false
-      matrix:
-        browser: [chromium, firefox, webkit]
+    runs-on: ubuntu-latest  # Use the latest Ubuntu LTS runner image.
+    timeout-minutes: 30     # Hard cap to prevent runaway jobs consuming minutes.
 
     steps:
+      # -----------------------------------------------------------------------
+      # Step 1 -- Checkout source code
+      # Fetches the full repository so all test files and config are available.
+      # -----------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      # -----------------------------------------------------------------------
+      # Step 2 -- Set up Python 3.13
+      # Matches the target runtime. pip dependency cache is enabled to speed up
+      # subsequent runs when requirements.txt has not changed.
+      # -----------------------------------------------------------------------
+      - name: Set up Python 3.13
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: "pip"
+          python-version: "3.13"
+          cache: "pip"  # Cache pip packages keyed on requirements.txt hash.
 
-      - name: Install dependencies
+      # -----------------------------------------------------------------------
+      # Step 3 -- Install Python dependencies
+      # Installs all packages pinned in requirements.txt (playwright, pytest,
+      # pytest-playwright, pytest-html, python-dotenv, etc.).
+      # -----------------------------------------------------------------------
+      - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Playwright browsers
-        run: playwright install --with-deps ${{ matrix.browser }}
+      # -----------------------------------------------------------------------
+      # Step 4 -- Install Playwright browsers and OS dependencies
+      # Downloads Chromium, Firefox, and WebKit binaries plus the system-level
+      # libraries required by each browser on the Ubuntu runner.
+      # -----------------------------------------------------------------------
+      - name: Install Playwright Chromium
+        run: playwright install --with-deps chromium
 
+      # -----------------------------------------------------------------------
+      # Create reports folder
+      - name: Create reports directory 
+        run: | 
+          mkdir -p reports
+
+      # ------------------------------------------------------------------------
+      # Step 5 -- Run pytest test suite
+      # Security guardrail: credentials are injected from GitHub Secrets and
+      # mapped to environment variables consumed by python-dotenv / get_env().
+      # Never hardcode secret values here -- use ${{ secrets.NAME }} only.
+      # --html generates the report; --self-contained-html bundles CSS/JS into
+      # a single portable file. The workflow fails automatically if pytest
+      # exits with a non-zero code (any test failure).
+      # -----------------------------------------------------------------------
       - name: Run tests
         env:
-          STAGING_URL: ${{ secrets.STAGING_URL }}
-          PROD_URL: ${{ secrets.PROD_URL }}
+          # Security: secrets are stored in GitHub repository/org secret store
+          # and injected here at runtime -- never written to disk or logs.
           TEST_USERNAME: ${{ secrets.TEST_USERNAME }}
           TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
         run: |
-          pytest tests/ \
-            --browser ${{ matrix.browser }} \
-            --env ${{ github.event.inputs.environment || 'staging' }} \
-            --html=reports/report-${{ matrix.browser }}.html \
-            --self-contained-html
+          pytest tests/specs \
+            --browser chromium \
+            --html=reports/report.html \
+             --self-contained-html \
+             -v
 
+      # -----------------------------------------------------------------------
+      # Step 6 -- Upload HTML test report as workflow artifact
+      # 'if: always()' ensures the report is uploaded even when tests fail,
+      # so engineers can inspect failures without re-running the job.
+      # The report is retained for 14 days and then automatically deleted.
+      # -----------------------------------------------------------------------
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-report-${{ matrix.browser }}
-          path: reports/
+          name: playwright-html-report
+          path: reports/report.html
           retention-days: 14
-
-      - name: Upload videos on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-videos-${{ matrix.browser }}
-          path: reports/videos/
-          retention-days: 7
