@@ -1,0 +1,638 @@
+# =============================================================================
+# ai-security.yml — Custom Semgrep Rules
+# =============================================================================
+# Purpose : Detect security violations in AI-generated Python code,
+#            Playwright automation frameworks, and CI/CD pipeline files.
+# Target  : Python source files and GitHub Actions YAML workflows.
+# Usage   : semgrep --config=ai-security.yml .
+# Author  : Application Security Engineering
+# =============================================================================
+
+rules:
+
+  # ===========================================================================
+  # CATEGORY 1 — HARDCODED SECRETS
+  # Detect secret values assigned directly to sensitive variable names.
+  # Secrets in source code are exposed to everyone with repo access and are
+  # permanently embedded in git history even after removal.
+  # ===========================================================================
+
+  - id: hardcoded-api-key
+    patterns:
+      - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(API_KEY|API_TOKEN|ACCESS_TOKEN|AUTH_TOKEN)$
+      - metavariable-regex:
+          metavariable: "\"...\""
+          regex: .{8,}
+    message: |
+      Hardcoded API key or token detected in variable '$VAR'.
+      Secrets must never be stored in source code or committed to version control.
+      REMEDIATION: Remove the value, add the variable name to .gitignore-protected
+      .env file, and load it with os.getenv('$VAR') or a secrets manager.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  - id: hardcoded-secret-key
+    patterns:
+      - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(SECRET_KEY|CLIENT_SECRET|PRIVATE_KEY|SIGNING_KEY)$
+      - metavariable-regex:
+          metavariable: "\"...\""
+          regex: .{8,}
+    message: |
+      Hardcoded secret key detected in variable '$VAR'.
+      REMEDIATION: Store the secret in an environment variable or a dedicated
+      secrets manager (e.g. AWS Secrets Manager, HashiCorp Vault) and load it
+      at runtime with os.getenv('$VAR').
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  - id: hardcoded-password
+    patterns:
+      - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(PASSWORD|DB_PASSWORD|USER_PASSWORD|ADMIN_PASSWORD|ROOT_PASSWORD|APP_PASSWORD)$
+      - metavariable-regex:
+          metavariable: "\"...\""
+          regex: .{4,}
+    message: |
+      Hardcoded password detected in variable '$VAR'.
+      Passwords in source code are a critical security risk — they are visible
+      to all contributors and persist in git history indefinitely.
+      REMEDIATION: Use os.getenv('$VAR') and ensure the actual value is only
+      ever present in a .env file that is listed in .gitignore.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  - id: hardcoded-aws-credentials
+    patterns:
+      - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(AWS_ACCESS_KEY|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SECRET_KEY)$
+      - metavariable-regex:
+          metavariable: "\"...\""
+          regex: .{16,}
+    message: |
+      Hardcoded AWS credential detected in variable '$VAR'.
+      Exposed AWS credentials enable unauthorized access to cloud infrastructure
+      and can result in data breaches or significant financial damage.
+      REMEDIATION: Use AWS IAM roles, instance profiles, or load credentials
+      with os.getenv('$VAR') from a secrets manager. Never commit AWS keys.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  # ===========================================================================
+  # CATEGORY 2 — WEAK CRYPTOGRAPHY
+  # MD5 and SHA-1 are cryptographically broken and must not be used for
+  # password hashing, digital signatures, or security-sensitive checksums.
+  # ===========================================================================
+
+  - id: use-of-md5
+    patterns:
+      - pattern: hashlib.md5(...)
+    message: |
+      MD5 is a cryptographically broken hash function and must not be used
+      for password hashing, data integrity verification, or digital signatures.
+      MD5 is vulnerable to collision attacks and rainbow table attacks.
+      REMEDIATION:
+        - For password hashing: use hashlib.scrypt(), bcrypt, or argon2-cffi.
+        - For general checksums: use hashlib.sha256() or hashlib.sha3_256().
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: cryptography
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+
+  - id: use-of-sha1
+    patterns:
+      - pattern: hashlib.sha1(...)
+    message: |
+      SHA-1 is deprecated and cryptographically weak. It is vulnerable to
+      chosen-prefix collision attacks and must not be used in security contexts.
+      REMEDIATION: Replace with hashlib.sha256() or hashlib.sha3_256().
+      For password hashing, use hashlib.scrypt(), bcrypt, or argon2.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: cryptography
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+
+  # ===========================================================================
+  # CATEGORY 3 — DANGEROUS COMMAND EXECUTION
+  # shell=True passes the command string to the OS shell interpreter, enabling
+  # command injection if any part of the string originates from user input.
+  # os.system() is similarly dangerous and provides no output capture control.
+  # ===========================================================================
+
+  - id: subprocess-shell-true-run
+    patterns:
+      - pattern: subprocess.run(..., shell=True, ...)
+    message: |
+      subprocess.run() called with shell=True. This spawns a shell process and
+      enables OS command injection if any part of the command string is derived
+      from user input or external data.
+      REMEDIATION: Use shell=False (the default) and pass the command as a list:
+        subprocess.run(["command", "arg1", "arg2"], shell=False)
+      If shell features are genuinely required, sanitize all inputs rigorously.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: injection
+      owasp: "A03:2021 - Injection"
+      cwe: "CWE-78: OS Command Injection"
+
+  - id: subprocess-shell-true-call
+    patterns:
+      - pattern: subprocess.call(..., shell=True, ...)
+    message: |
+      subprocess.call() called with shell=True. This enables OS command injection
+      via shell metacharacter expansion (;, |, &&, backticks, $()).
+      REMEDIATION: Replace with subprocess.run() using shell=False and a list
+      of arguments:
+        subprocess.run(["command", "arg1"], shell=False, check=True)
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: injection
+      owasp: "A03:2021 - Injection"
+      cwe: "CWE-78: OS Command Injection"
+
+  - id: os-system-call
+    patterns:
+      - pattern: os.system(...)
+    message: |
+      os.system() executes a command through the system shell and is vulnerable
+      to command injection. It also provides no mechanism to capture output
+      securely or handle errors safely.
+      REMEDIATION: Replace with subprocess.run() using shell=False:
+        result = subprocess.run(["command", "arg"], capture_output=True,
+                                text=True, shell=False, check=True)
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: injection
+      owasp: "A03:2021 - Injection"
+      cwe: "CWE-78: OS Command Injection"
+
+  # ===========================================================================
+  # CATEGORY 4 — UNSAFE SERIALIZATION
+  # Python's pickle module executes arbitrary code during deserialization.
+  # A malicious pickle payload can achieve remote code execution (RCE).
+  # ===========================================================================
+
+  - id: pickle-serialize
+    patterns:
+      - pattern: pickle.dumps(...)
+    message: |
+      pickle.dumps() serializes Python objects to a format that executes
+      arbitrary code when deserialized. If the serialized output is stored,
+      transmitted, or later deserialized from an untrusted source, this enables
+      remote code execution (RCE).
+      REMEDIATION: Use a safe serialization format such as JSON (json.dumps()),
+      msgpack, or protocol buffers. Never use pickle for data crossing a trust
+      boundary.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: deserialization
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+
+  - id: pickle-deserialize
+    patterns:
+      - pattern: pickle.loads(...)
+    message: |
+      pickle.loads() deserializes data by executing embedded Python bytecode.
+      Deserializing untrusted pickle data is equivalent to executing arbitrary
+      code and can result in full system compromise (RCE).
+      REMEDIATION: Never deserialize pickle data from untrusted sources.
+      Use json.loads() or another safe deserialization format. If pickle must
+      be used, cryptographically sign the payload and verify before loading.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: deserialization
+      owasp: "A08:2021 - Software and Data Integrity Failures"
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+
+  # ===========================================================================
+  # CATEGORY 5 — SQL INJECTION PATTERNS
+  # String concatenation, f-strings, and % formatting with SQL statements
+  # allow attackers to modify query logic and exfiltrate or destroy data.
+  # ===========================================================================
+
+  - id: sql-injection-string-concat
+    patterns:
+      - pattern: |
+          $CURSOR.execute($QUERY + $VAR)
+    message: |
+      SQL query constructed via string concatenation. If '$VAR' contains
+      user-supplied input, this is a SQL injection vulnerability that allows
+      an attacker to modify query logic, bypass authentication, or exfiltrate data.
+      REMEDIATION: Use parameterized queries exclusively:
+        cursor.execute("SELECT * FROM t WHERE col = %s", (value,))   # psycopg2
+        cursor.execute("SELECT * FROM t WHERE col = ?", (value,))    # sqlite3
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: injection
+      owasp: "A03:2021 - Injection"
+      cwe: "CWE-89: SQL Injection"
+
+  - id: sql-injection-fstring
+    patterns:
+      - pattern: $CURSOR.execute(f"... $VAR ...")
+    message: |
+      SQL query constructed with an f-string containing variable '$VAR'.
+      F-string interpolation in SQL statements enables SQL injection.
+      REMEDIATION: Replace the f-string with a parameterized query:
+        cursor.execute("DELETE FROM t WHERE id = ?", (user_id,))
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: injection
+      owasp: "A03:2021 - Injection"
+      cwe: "CWE-89: SQL Injection"
+
+  - id: sql-injection-percent-format
+    patterns:
+      - pattern: $CURSOR.execute("..." % $VAR)
+    message: |
+      SQL query constructed with % string formatting. This is a SQL injection
+      vulnerability if '$VAR' contains any user-controlled data.
+      REMEDIATION: Use parameterized queries:
+        cursor.execute("SELECT * FROM t WHERE id = %s", (user_id,))
+      Note: The %s placeholder in parameterized queries is handled safely by
+      the database driver — it is NOT the same as Python % formatting.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: injection
+      owasp: "A03:2021 - Injection"
+      cwe: "CWE-89: SQL Injection"
+
+  - id: sql-injection-format-method
+    patterns:
+      - pattern: $CURSOR.execute("...".format(...))
+    message: |
+      SQL query constructed with str.format(). This allows SQL injection if
+      any format arguments originate from user input or external data.
+      REMEDIATION: Replace str.format() with parameterized query placeholders
+      handled by the database driver.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: injection
+      owasp: "A03:2021 - Injection"
+      cwe: "CWE-89: SQL Injection"
+
+  # ===========================================================================
+  # CATEGORY 6 — PLAYWRIGHT AUTOMATION SECURITY RULES
+  # Credentials passed directly to Playwright fill() or goto() calls expose
+  # secrets in test code, CI logs, and version control history.
+  # ===========================================================================
+
+  - id: playwright-hardcoded-credential-fill
+    patterns:
+      - pattern-either:
+          - pattern: $PAGE.fill($SELECTOR, "...")
+          - pattern: $LOCATOR.fill("...")
+      - metavariable-regex:
+          metavariable: $SELECTOR
+          regex: (?i)(password|passwd|secret|credential|token|api.?key)
+    message: |
+      Hardcoded credential value passed directly to a Playwright fill() call
+      targeting a sensitive field ('$SELECTOR').
+      Secrets hardcoded in tests are exposed in source code, CI logs, and
+      any artifact storage that retains test output.
+      REMEDIATION:
+        username = os.getenv("TEST_USERNAME")
+        password = os.getenv("TEST_PASSWORD")
+        page.get_by_label("Password").fill(password)
+      Load all credentials from environment variables via get_env() and never
+      inline them in test files.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  - id: playwright-hardcoded-url-with-credentials
+    patterns:
+      - pattern-either:
+          - pattern: $PAGE.goto("http://$USER:$PASS@...")
+          - pattern: $PAGE.goto("https://$USER:$PASS@...")
+    message: |
+      Playwright goto() called with a URL containing embedded credentials
+      (http://user:password@host). Credentials embedded in URLs appear in
+      browser history, server access logs, referrer headers, and test reports.
+      REMEDIATION: Authenticate via form login or HTTP headers rather than
+      embedding credentials in the URL. Store credentials in environment
+      variables and never hardcode them in navigation calls.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-522: Insufficiently Protected Credentials"
+
+  - id: playwright-no-os-getenv-in-tests
+    pattern: os.getenv(...)
+    message: |
+      os.getenv() called directly inside a test file. Environment variable
+      access in test files bypasses the centralized fixture-managed configuration
+      in conftest.py, making it harder to audit how secrets flow through the
+      framework.
+      REMEDIATION: Use get_env() from helpers/data_helpers.py or read
+      environment values exclusively through pytest fixtures defined in conftest.py.
+    languages: [python]
+    severity: WARNING
+    paths:
+      include:
+        - "**/tests/**/*.py"
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+
+  # ===========================================================================
+  # CATEGORY 7 — ENVIRONMENT VARIABLE ENFORCEMENT
+  # API keys and passwords that are not loaded via os.getenv() indicate
+  # they may be hardcoded literals elsewhere in the assignment chain.
+  # ===========================================================================
+
+  - id: env-var-not-used-for-api-key
+    patterns:
+      - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(api.?key|api.?token|access.?token|auth.?token)
+      - pattern-not: $VAR = os.getenv(...)
+      - pattern-not: $VAR = os.environ[...]
+      - pattern-not: $VAR = os.environ.get(...)
+    message: |
+      '$VAR' appears to hold an API key or token but is not loaded from an
+      environment variable. The value is either hardcoded or derived from a
+      non-environment source.
+      REMEDIATION: Replace the assignment with:
+        $VAR = os.getenv("$VAR")
+      and store the actual value only in your .env file (excluded from git).
+    languages: [python]
+    severity: WARNING
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  - id: env-var-not-used-for-password
+    patterns:
+      - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|passwd|db.?pass|secret)
+      - pattern-not: $VAR = os.getenv(...)
+      - pattern-not: $VAR = os.environ[...]
+      - pattern-not: $VAR = os.environ.get(...)
+    message: |
+      '$VAR' appears to hold a password but is not loaded from an environment
+      variable.
+      REMEDIATION: Replace with:
+        $VAR = os.getenv("$VAR")
+      Ensure the actual password is stored only in a .gitignore-protected .env
+      file and rotated if it has been committed previously.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  # ===========================================================================
+  # CATEGORY 8 — LOGGING SENSITIVE INFORMATION
+  # Printing or logging credentials, tokens, and PII writes them to stdout,
+  # log files, CI artifact stores, and monitoring systems — all potentially
+  # accessible to attackers or unauthorized personnel.
+  # ===========================================================================
+
+  - id: print-sensitive-variable
+    patterns:
+      - pattern: print($VAR)
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|passwd|token|secret|api.?key|credential|auth)
+    message: |
+      Sensitive variable '$VAR' passed to print(). This writes the secret value
+      to stdout, which may be captured in CI logs, terminal recordings, or test
+      reports.
+      REMEDIATION: Remove the print statement. If debugging is necessary, use
+      masked logging (e.g. log only the first 4 characters) and ensure debug
+      output is never enabled in CI or production environments.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      category: security
+      subcategory: information-disclosure
+      owasp: "A09:2021 - Security Logging and Monitoring Failures"
+      cwe: "CWE-532: Insertion of Sensitive Information into Log File"
+
+  - id: logger-info-sensitive-variable
+    patterns:
+      - pattern-either:
+          - pattern: logging.info($VAR)
+          - pattern: logging.debug($VAR)
+          - pattern: logging.warning($VAR)
+          - pattern: $LOGGER.info($VAR)
+          - pattern: $LOGGER.debug($VAR)
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|passwd|token|secret|api.?key|credential|auth)
+    message: |
+      Sensitive variable '$VAR' passed directly to a logging call. Log files
+      are often stored long-term, forwarded to SIEM systems, or accessible to
+      operations teams — they must never contain credentials or tokens.
+      REMEDIATION: Never log raw credential values. If you need to confirm a
+      value was set, log only a boolean: logging.debug("password set: %s", bool(password))
+    languages: [python]
+    severity: WARNING
+    metadata:
+      category: security
+      subcategory: information-disclosure
+      owasp: "A09:2021 - Security Logging and Monitoring Failures"
+      cwe: "CWE-532: Insertion of Sensitive Information into Log File"
+
+  # ===========================================================================
+  # CATEGORY 9 — INSECURE HTTP USAGE
+  # Plain HTTP transmits data in cleartext, exposing credentials, tokens, and
+  # session cookies to network eavesdropping and man-in-the-middle attacks.
+  # ===========================================================================
+
+  - id: requests-http-get
+    patterns:
+      - pattern: requests.get("http://...", ...)
+    message: |
+      requests.get() called with a plain HTTP URL. HTTP does not encrypt data
+      in transit, exposing request headers (including Authorization tokens and
+      session cookies) to network interception.
+      REMEDIATION: Use HTTPS for all network requests:
+        requests.get("https://api.example.com/endpoint", ...)
+      If you are testing against a local HTTP server, suppress this finding with
+      a Semgrep nosemgrep comment only for that specific line.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      category: security
+      subcategory: transport-security
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+
+  - id: requests-http-post
+    patterns:
+      - pattern: requests.post("http://...", ...)
+    message: |
+      requests.post() called with a plain HTTP URL. POST bodies (including form
+      credentials and JSON payloads) are transmitted in cleartext over HTTP and
+      are visible to anyone on the network path.
+      REMEDIATION: Use HTTPS:
+        requests.post("https://api.example.com/endpoint", json=payload)
+    languages: [python]
+    severity: WARNING
+    metadata:
+      category: security
+      subcategory: transport-security
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+
+  - id: requests-ssl-verify-disabled
+    patterns:
+      - pattern: requests.$METHOD(..., verify=False, ...)
+    message: |
+      TLS certificate verification disabled (verify=False) in a requests call.
+      This allows man-in-the-middle attacks by accepting any certificate,
+      including self-signed or attacker-controlled ones.
+      REMEDIATION: Never disable certificate verification in production or CI.
+      If you need to trust a custom CA, provide the CA bundle path:
+        requests.get(url, verify="/path/to/ca-bundle.crt")
+    languages: [python]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: transport-security
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-295: Improper Certificate Validation"
+
+  # ===========================================================================
+  # CATEGORY 10 — CI/CD SECURITY RULES (GitHub Actions YAML)
+  # Secrets hardcoded in workflow files are exposed to all repository
+  # contributors and are permanently stored in git history.
+  # ===========================================================================
+
+  - id: github-actions-hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: |
+              env:
+                $VAR: "..."
+          - pattern: |
+              with:
+                $VAR: "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|passwd|token|secret|api.?key|access.?key|credential|auth)
+      - pattern-not: |
+          env:
+            $VAR: ${{ secrets.$SECRET }}
+      - pattern-not: |
+          with:
+            $VAR: ${{ secrets.$SECRET }}
+    message: |
+      Hardcoded secret value assigned to '$VAR' in a GitHub Actions workflow file.
+      Workflow files are committed to the repository and visible to all contributors.
+      REMEDIATION: Store the value as a GitHub repository or organisation secret
+      and reference it with the secrets context:
+        env:
+          $VAR: ${{ secrets.MY_SECRET_NAME }}
+      Rotate any secret that has already been committed.
+    languages: [yaml]
+    severity: ERROR
+    paths:
+      include:
+        - "**/.github/workflows/*.yml"
+        - "**/.github/workflows/*.yaml"
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  - id: github-actions-plaintext-token-in-run
+    patterns:
+      - pattern: |
+          run: "... $TOKEN ..."
+      - metavariable-regex:
+          metavariable: $TOKEN
+          regex: (?i)(password|passwd|token|secret|api.?key|bearer\s)
+    message: |
+      Possible hardcoded token or password embedded in a GitHub Actions 'run'
+      step command string. Shell commands in workflow files are logged by the
+      GitHub Actions runner and visible in workflow run logs.
+      REMEDIATION: Move the value to a GitHub secret and reference it as an
+      environment variable in the step:
+        env:
+          MY_TOKEN: ${{ secrets.MY_TOKEN }}
+        run: ./script.sh
+      Access it in the script as $MY_TOKEN.
+    languages: [yaml]
+    severity: ERROR
+    paths:
+      include:
+        - "**/.github/workflows/*.yml"
+        - "**/.github/workflows/*.yaml"
+    metadata:
+      category: security
+      subcategory: secrets
+      owasp: "A02:2021 - Cryptographic Failures"
+      cwe: "CWE-798: Use of Hard-coded Credentials"
