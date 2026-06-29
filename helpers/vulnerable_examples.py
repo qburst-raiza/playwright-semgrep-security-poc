@@ -1,143 +1,179 @@
 """
-INTENTIONALLY VULNERABLE EXAMPLES — FOR SEMGREP EVALUATION ONLY
-================================================================
-This file contains deliberately insecure code patterns used solely to verify
-that Semgrep (or another SAST tool) correctly detects the following rule categories:
+REMEDIATED EXAMPLES — SECURE REPLACEMENT FOR vulnerable_examples.py
+====================================================================
+This file provides secure replacements for all vulnerability patterns found in
+helpers/vulnerable_examples.py. Original functionality is preserved wherever
+possible. Each remediation is documented inline.
 
-    - python.lang.security.hardcoded-api-key
-    - python.lang.security.hardcoded-password
-    - python.lang.security.hardcoded-token
-    - python.lang.security.insecure-hash-algorithms
-    - python.lang.security.subprocess-shell-true
-    - python.lang.security.insecure-pickle
+Remediations applied:
+    1.  Hardcoded API key        → os.getenv()
+    2.  Hardcoded password       → os.getenv()
+    3.  Hardcoded auth token     → os.getenv()
+    4.  Weak cryptography (MD5)  → hashlib.scrypt() / hashlib.sha256()
+    5.  Command injection        → subprocess argument list, shell=False, check=True
+    6.  Unsafe serialisation     → json.dumps()
+    7.  Unsafe deserialisation   → json.loads()
+    8.  SQL injection            → parameterised queries
 
-DO NOT use any of the code in this file in production or any real application.
-DO NOT store real secrets here — all values below are synthetic placeholders.
+Compatible with:
+    - Semgrep p/security-audit
+    - Semgrep p/owasp-top-ten
+    - Custom rules defined in ai-security.yml
 """
 
 import hashlib
-import pickle
-import subprocess
+import json
+import os
 import sqlite3
+import subprocess
 
 
 # ── 1. HARDCODED API KEY ──────────────────────────────────────────────────────
-# VULN: API key embedded directly in source code.
-# Semgrep rule: generic.secrets.security.detected-generic-api-key
-# Risk: Key is exposed in version control and to anyone with read access to the repo.
-API_KEY = "AIzaSyD-INTENTIONALLY_FAKE_KEY_FOR_SEMGREP_TEST_1234567890abcdef"  # noqa: S105
+# REMEDIATION: Load the API key from an environment variable at runtime.
+# Never store secret values as literals in source code or commit them to VCS.
+# Store the real value in a .env file (excluded from git via .gitignore) or in
+# a secrets manager (e.g. AWS Secrets Manager, HashiCorp Vault).
+# OWASP A02:2021 — Cryptographic Failures | CWE-798
+API_KEY = os.getenv("API_KEY")
 
 
-def get_api_key():
-    # VULN: Returning hardcoded secret from a function — Semgrep flags this pattern.
+def get_api_key() -> str | None:
+    # REMEDIATION: Return the value sourced from the environment.
+    # Returns None if the variable is not set — callers should validate.
     return API_KEY
 
 
 # ── 2. HARDCODED PASSWORD ─────────────────────────────────────────────────────
-# VULN: Password literal assigned to a variable named 'password'.
-# Semgrep rule: python.lang.security.audit.hardcoded-password-string
-# Risk: Anyone with source access obtains the credential in plaintext.
-DB_PASSWORD = "S3cr3tP@ssw0rd_SEMGREP_TEST"  # noqa: S105
+# REMEDIATION: Load the database password from an environment variable.
+# Hardcoded credentials are permanently embedded in git history even after
+# removal. Environment variables keep secrets out of the codebase entirely.
+# OWASP A02:2021 — Cryptographic Failures | CWE-798
+DB_PASSWORD = os.getenv("DB_PASSWORD")
 
 
-def connect_database():
-    # VULN: Hardcoded password passed directly to a connection call.
+def connect_database() -> dict:
+    # REMEDIATION: Password is read from the environment, not embedded in code.
     return {"host": "localhost", "password": DB_PASSWORD}
 
 
 # ── 3. HARDCODED TOKEN ────────────────────────────────────────────────────────
-# VULN: Bearer token literal in source.
-# Semgrep rule: generic.secrets.security.detected-generic-secret
-# Risk: Token grants API access to anyone who reads this file.
-AUTH_TOKEN = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.SEMGREP_TEST_FAKE_TOKEN.signature"  # noqa: S105
+# REMEDIATION: Load the bearer token from an environment variable.
+# Tokens grant API access to anyone who reads them; keeping them in env vars
+# limits exposure to authorised runtime contexts only.
+# OWASP A02:2021 — Cryptographic Failures | CWE-798
+AUTH_TOKEN = os.getenv("AUTH_TOKEN")
 
 HEADERS = {
-    "Authorization": AUTH_TOKEN,  # VULN: Hardcoded bearer token in headers dict.
+    # REMEDIATION: Reference the environment-sourced variable, not a literal.
+    "Authorization": AUTH_TOKEN,
 }
 
 
-# ── 4. MD5 HASHING ────────────────────────────────────────────────────────────
-# VULN: MD5 is cryptographically broken and must not be used for password hashing
-#       or integrity verification of security-sensitive data.
-# Semgrep rule: python.lang.security.audit.md5-used
-# Risk: Collision attacks and rainbow tables render MD5 trivially reversible.
+# ── 4. WEAK CRYPTOGRAPHY — PASSWORD HASHING ──────────────────────────────────
+# REMEDIATION: Replace hashlib.md5() with hashlib.scrypt().
+# scrypt is a memory-hard key-derivation function designed for password hashing.
+# It is resistant to brute-force and GPU-accelerated attacks.
+# A unique random salt is generated per invocation and prepended to the output
+# so that identical passwords produce different hashes.
+# OWASP A02:2021 — Cryptographic Failures | CWE-327
 def hash_password_md5(password: str) -> str:
-    # VULN: Using MD5 to hash a password — should use bcrypt, argon2, or scrypt.
-    return hashlib.md5(password.encode()).hexdigest()  # noqa: S324
+    # REMEDIATION: Use scrypt with a cryptographically random 16-byte salt.
+    # Parameters (NIST / OWASP recommended minimums):
+    #   n=16384 — CPU/memory cost factor (must be a power of 2)
+    #   r=8     — block size
+    #   p=1     — parallelisation factor
+    salt = os.urandom(16)
+    dk = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1)
+    # Store as "salt_hex:derived_key_hex" so the salt can be recovered for verification.
+    return salt.hex() + ":" + dk.hex()
 
 
+# ── 4b. WEAK CRYPTOGRAPHY — INTEGRITY CHECKSUM ───────────────────────────────
+# REMEDIATION: Replace hashlib.md5() with hashlib.sha256() for checksums.
+# MD5 is collision-prone and must not be used for security-sensitive integrity
+# checks. SHA-256 provides 128-bit collision resistance.
+# OWASP A02:2021 — Cryptographic Failures | CWE-327
 def compute_md5_checksum(data: bytes) -> str:
-    # VULN: MD5 used for integrity check — SHA-256 or SHA-3 should be used instead.
-    return hashlib.md5(data).hexdigest()  # noqa: S324
+    # REMEDIATION: Use SHA-256 for data integrity verification.
+    return hashlib.sha256(data).hexdigest()
 
 
-# ── 5. SUBPROCESS WITH shell=True ────────────────────────────────────────────
-# VULN: shell=True passes the command string to the OS shell, enabling
-#       command injection if any part of the string is derived from user input.
-# Semgrep rule: python.lang.security.audit.subprocess-shell-true
-# Risk: An attacker can inject shell metacharacters (;, |, &&, `) to execute
-#       arbitrary commands on the host OS.
+# ── 5. COMMAND INJECTION ──────────────────────────────────────────────────────
+# REMEDIATION: Remove shell=True and pass command as an argument list.
+# With shell=False (the default), the OS executes the binary directly without
+# invoking a shell interpreter, so shell metacharacters (;, |, &&, `) in
+# user_input cannot be used to inject additional commands.
+# check=True raises CalledProcessError on non-zero exit codes instead of
+# silently swallowing failures.
+# OWASP A03:2021 — Injection | CWE-78
 def run_command(user_input: str) -> str:
-    # VULN: user_input is interpolated into a shell command — command injection risk.
-    result = subprocess.run(  # noqa: S602
-        f"echo {user_input}",
-        shell=True,           # VULN: shell=True enables injection
+    # REMEDIATION: Pass arguments as a list; shell=False is the secure default.
+    result = subprocess.run(
+        ["echo", user_input],   # Each argument is a separate list element.
+        shell=False,            # REMEDIATION: Never use shell=True with user input.
         capture_output=True,
         text=True,
+        check=True,             # Raise on non-zero exit code for explicit error handling.
     )
     return result.stdout
 
 
 def ping_host(hostname: str) -> None:
-    # VULN: shell=True with a formatted string — classic injection vector.
-    subprocess.call(f"ping -c 1 {hostname}", shell=True)  # noqa: S602, S603
+    # REMEDIATION: Pass ping and its arguments as a list; no shell interpolation.
+    subprocess.run(
+        ["ping", "-c", "1", hostname],  # hostname is passed as a discrete argument.
+        shell=False,                    # REMEDIATION: Eliminates shell injection vector.
+        check=True,
+    )
 
 
-# ── 6. PICKLE SERIALIZATION ───────────────────────────────────────────────────
-# VULN: pickle.dumps() serialises arbitrary Python objects.
-#       If the serialised output is stored or transmitted and later deserialised
-#       from an untrusted source, it allows remote code execution.
-# Semgrep rule: python.lang.security.audit.pickle
-# Risk: Pickle data can encode __reduce__ methods that execute arbitrary code
-#       when unpickled.
-def serialize_object(obj: object) -> bytes:
-    # VULN: Serialising to pickle format — use JSON or msgpack for safe serialisation.
-    return pickle.dumps(obj)  # noqa: S301
+# ── 6. UNSAFE SERIALISATION ───────────────────────────────────────────────────
+# REMEDIATION: Replace pickle.dumps() with json.dumps().
+# JSON serialisation cannot embed executable code; pickle can encode arbitrary
+# Python objects including __reduce__ hooks that execute code on deserialisation.
+# Only objects with JSON-compatible types (dict, list, str, int, float, bool,
+# None) can be serialised with json — this restriction is intentional and safe.
+# OWASP A08:2021 — Software and Data Integrity Failures | CWE-502
+def serialize_object(obj: object) -> str:
+    # REMEDIATION: Use json.dumps() — returns a str instead of bytes.
+    # Raises TypeError for non-serialisable types, preventing silent data loss.
+    return json.dumps(obj)
 
 
-# ── 7. PICKLE DESERIALIZATION ─────────────────────────────────────────────────
-# VULN: pickle.loads() on data from any external or untrusted source allows
-#       remote code execution. This is one of the most critical Python security flaws.
-# Semgrep rule: python.lang.security.audit.pickle
-# Risk: A crafted pickle payload can call os.system(), subprocess, or exec() during
-#       deserialization, giving an attacker full code execution.
-def deserialize_object(data: bytes) -> object:
-    # VULN: Never unpickle data received from a network socket, file, or user input.
-    return pickle.loads(data)  # noqa: S301
+# ── 7. UNSAFE DESERIALISATION ─────────────────────────────────────────────────
+# REMEDIATION: Replace pickle.loads() with json.loads().
+# json.loads() can only reconstruct primitive Python types from a JSON string;
+# it cannot execute arbitrary code embedded in the payload.
+# OWASP A08:2021 — Software and Data Integrity Failures | CWE-502
+def deserialize_object(data: str) -> object:
+    # REMEDIATION: Use json.loads() — safe for untrusted input.
+    # Note: the parameter type changed from bytes to str to match json.loads().
+    return json.loads(data)
 
 
-# ── 8. SQL QUERY CONCATENATION ───────────────────────────────────────────────
-# VULN: Building SQL queries by string concatenation with user-supplied values
-#       enables SQL injection attacks.
-# Semgrep rule: python.lang.security.audit.formatted-sql-query
-# Risk: An attacker can inject SQL syntax to bypass authentication, exfiltrate data,
-#       modify records, or drop tables (e.g., username = "' OR '1'='1").
+# ── 8a. SQL INJECTION — STRING CONCATENATION ─────────────────────────────────
+# REMEDIATION: Replace string concatenation with a parameterised query.
+# The DB-API 2.0 placeholder (?) causes the database driver to transmit the
+# parameter value separately from the SQL statement, making injection impossible
+# regardless of what characters username contains.
+# OWASP A03:2021 — Injection | CWE-89
 def get_user_by_username(username: str) -> list:
     conn = sqlite3.connect(":memory:")
     cursor = conn.cursor()
-    # VULN: username is concatenated directly — use parameterised queries instead:
-    #       cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
-    query = "SELECT * FROM users WHERE username = '" + username + "'"  # noqa: S608
-    cursor.execute(query)  # VULN: SQL injection
+    # REMEDIATION: Use a parameterised query with a tuple of bind values.
+    # The driver handles quoting/escaping; user input never becomes part of SQL text.
+    cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
     return cursor.fetchall()
 
 
+# ── 8b. SQL INJECTION — F-STRING INTERPOLATION ───────────────────────────────
+# REMEDIATION: Replace f-string interpolation with a parameterised query.
+# F-string formatting and % formatting are both vulnerable to injection because
+# they produce a final SQL string before the DB driver ever sees it.
+# OWASP A03:2021 — Injection | CWE-89
 def delete_user(user_id: str) -> None:
     conn = sqlite3.connect(":memory:")
     cursor = conn.cursor()
-    # VULN: f-string interpolation in SQL — use parameterised queries.
-    cursor.execute(f"DELETE FROM users WHERE id = {user_id}")  # noqa: S608
+    # REMEDIATION: Pass user_id as a bind parameter, not embedded in the SQL string.
+    cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
-    
-# Demo change
-# Trigger CI/CD pipeline
